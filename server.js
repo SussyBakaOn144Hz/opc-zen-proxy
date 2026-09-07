@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -8,20 +7,24 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const UPSTREAM_BASE_URL = 'https://opencode.ai/zen/v1';
-const OPENCODE_API_KEY = process.env.OPENCODE_API_KEY || 'public';
 
-// Root health check to verify proxy status
+// Format key safely whether it includes 'Bearer ' or not
+function getAuthHeader(req) {
+  let key = process.env.OPENCODE_API_KEY || req.headers['authorization'] || 'public';
+  key = key.trim();
+  return key.startsWith('Bearer ') ? key : `Bearer ${key}`;
+}
+
 app.get('/', (req, res) => res.send('OpenCode Zen Proxy is running.'));
 
-// Dynamic passthrough for models directly from OpenCode Zen
+// 1. Models Route
 app.get('/v1/models', async (req, res) => {
   try {
     const upstreamResponse = await fetch(`${UPSTREAM_BASE_URL}/models`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${OPENCODE_API_KEY}`,
-        'User-Agent': 'opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13',
-        'x-opencode-client': 'cli'
+        'Authorization': getAuthHeader(req),
+        'User-Agent': 'opencode/1.18.16'
       }
     });
 
@@ -34,11 +37,11 @@ app.get('/v1/models', async (req, res) => {
     return res.json(data);
   } catch (err) {
     console.error('Models Proxy Error:', err);
-    res.status(500).json({ error: 'Failed to fetch models from OpenCode', details: err.message });
+    res.status(500).json({ error: 'Failed to fetch models', details: err.message });
   }
 });
 
-// Chat Completions Route
+// 2. Chat Completions Route
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const payload = { ...req.body };
@@ -48,19 +51,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       payload.model = payload.model.replace('opc/', '');
     }
 
-    // Dynamic IDs to simulate active CLI sessions
-    const randomHex = () => crypto.randomBytes(12).toString('hex');
-    const sessionId = `ses_${randomHex()}`;
-    const requestId = `msg_${randomHex()}`;
+    console.log(`[Proxy] Forwarding prompt for model: ${payload.model}`);
 
     const upstreamHeaders = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENCODE_API_KEY}`,
-      'User-Agent': 'opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13',
-      'x-opencode-client': 'cli',
-      'x-opencode-project': 'global',
-      'x-opencode-session': sessionId,
-      'x-opencode-request': requestId
+      'Authorization': getAuthHeader(req),
+      'User-Agent': 'opencode/1.18.16'
     };
 
     const upstreamResponse = await fetch(`${UPSTREAM_BASE_URL}/chat/completions`, {
@@ -69,11 +65,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       body: JSON.stringify(payload)
     });
 
+    console.log(`[Proxy] Upstream returned status: ${upstreamResponse.status}`);
+
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
+      console.error(`[Proxy Upstream Error]: ${errorText}`);
       return res.status(upstreamResponse.status).send(errorText);
     }
 
+    // Stream responses back to Tavo
     if (payload.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
