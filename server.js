@@ -24,7 +24,7 @@ app.get('/v1/models', async (req, res) => {
       method: 'GET',
       headers: {
         'Authorization': getAuthHeader(req),
-        'User-Agent': 'opencode/1.18.16',
+        'User-Agent': 'opencode/latest/1.18.18/cli',
         'x-opencode-client': 'cli'
       }
     });
@@ -63,7 +63,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const upstreamHeaders = {
       'Content-Type': 'application/json',
       'Authorization': authHeader,
-      'User-Agent': 'opencode/1.18.16',
+      'User-Agent': 'opencode/latest/1.18.18/cli',
       'x-opencode-client': 'cli',
       'x-opencode-project': 'global',
       'x-opencode-session': `ses_${randomHex()}`,
