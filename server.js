@@ -10,12 +10,41 @@ app.use(express.json({ limit: '10mb' }));
 const UPSTREAM_BASE_URL = 'https://opencode.ai/zen/v1';
 const OPENCODE_API_KEY = process.env.OPENCODE_API_KEY || 'public';
 
+// Root health check to verify proxy status
+app.get('/', (req, res) => res.send('OpenCode Zen Proxy is running.'));
+
+// Dynamic passthrough for models directly from OpenCode Zen
+app.get('/v1/models', async (req, res) => {
+  try {
+    const upstreamResponse = await fetch(`${UPSTREAM_BASE_URL}/models`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${OPENCODE_API_KEY}`,
+        'User-Agent': 'opencode/1.15.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13',
+        'x-opencode-client': 'cli'
+      }
+    });
+
+    if (!upstreamResponse.ok) {
+      const errorText = await upstreamResponse.text();
+      return res.status(upstreamResponse.status).send(errorText);
+    }
+
+    const data = await upstreamResponse.json();
+    return res.json(data);
+  } catch (err) {
+    console.error('Models Proxy Error:', err);
+    res.status(500).json({ error: 'Failed to fetch models from OpenCode', details: err.message });
+  }
+});
+
+// Chat Completions Route
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const payload = { ...req.body };
 
     // Strip UI prefixes
-    if (payload.model.startsWith('opc/')) {
+    if (payload.model && payload.model.startsWith('opc/')) {
       payload.model = payload.model.replace('opc/', '');
     }
 
