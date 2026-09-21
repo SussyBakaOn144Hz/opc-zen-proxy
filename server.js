@@ -9,15 +9,21 @@ app.use(express.json({ limit: '10mb' }));
 
 const UPSTREAM_BASE_URL = 'https://opencode.ai/zen/v1';
 
-// Stable session UUID per proxy instance
-const CLIENT_SESSION_ID = crypto.randomUUID();
+// Stable UUID per server instance for session continuity
+const SESSION_UUID = crypto.randomUUID();
 
 function getAuthHeader(req) {
   let key = process.env.OPENCODE_API_KEY || req.headers['authorization'] || '';
   key = key.trim();
 
-  // If blank or legacy 'public', pass standard empty Bearer for Zen free tier
-  if (!key || key === 'public' || key === 'Bearer public') {
+  // Strip dummy keys (frontends often send 'Bearer default', 'Bearer none', etc.)
+  if (
+    !key ||
+    key === 'public' ||
+    key === 'Bearer public' ||
+    key === 'Bearer default' ||
+    key === 'Bearer sk-none'
+  ) {
     return 'Bearer ';
   }
 
@@ -26,17 +32,28 @@ function getAuthHeader(req) {
 
 app.get('/', (req, res) => res.send('OpenCode Zen Proxy is running.'));
 
+// Build identical header signature matching official CLI
+function buildUpstreamHeaders(req) {
+  const reqId = `msg_${crypto.randomBytes(12).toString('hex')}`;
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': getAuthHeader(req),
+    'User-Agent': 'opencode/latest/cli',
+    'x-opencode-client': 'cli',
+    'x-opencode-project': 'global',
+    // Both session headers are required to satisfy all gateway checks
+    'x-session-id': SESSION_UUID,
+    'x-opencode-session': SESSION_UUID,
+    'x-opencode-request': reqId,
+  };
+}
+
 // Models Route
 app.get('/v1/models', async (req, res) => {
   try {
     const upstreamResponse = await fetch(`${UPSTREAM_BASE_URL}/models`, {
       method: 'GET',
-      headers: {
-        'Authorization': getAuthHeader(req),
-        'x-session-id': CLIENT_SESSION_ID,
-        'User-Agent': 'opencode/latest/cli',
-        'x-opencode-client': 'cli'
-      }
+      headers: buildUpstreamHeaders(req),
     });
 
     if (!upstreamResponse.ok) {
@@ -57,29 +74,20 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     const payload = { ...req.body };
 
+    // Clean common model prefix
     if (payload.model && payload.model.startsWith('opc/')) {
       payload.model = payload.model.replace('opc/', '');
     }
 
-    const authHeader = getAuthHeader(req);
-    console.log(`[Proxy] Model: ${payload.model} | Session: ${CLIENT_SESSION_ID}`);
-
-    const upstreamHeaders = {
-      'Content-Type': 'application/json',
-      'Authorization': authHeader,
-      'x-session-id': CLIENT_SESSION_ID,
-      'User-Agent': 'opencode/latest/cli',
-      'x-opencode-client': 'cli',
-      'x-opencode-project': 'global'
-    };
+    console.log(`[Proxy] Dispatching model: "${payload.model}" | Session: ${SESSION_UUID}`);
 
     const upstreamResponse = await fetch(`${UPSTREAM_BASE_URL}/chat/completions`, {
       method: 'POST',
-      headers: upstreamHeaders,
-      body: JSON.stringify(payload)
+      headers: buildUpstreamHeaders(req),
+      body: JSON.stringify(payload),
     });
 
-    console.log(`[Proxy] Upstream status: ${upstreamResponse.status}`);
+    console.log(`[Proxy] Upstream response: ${upstreamResponse.status}`);
 
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
@@ -87,7 +95,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       return res.status(upstreamResponse.status).send(errorText);
     }
 
-    // SSE Streaming
+    // SSE Stream
     if (payload.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -95,7 +103,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       const reader = upstreamResponse.body.getReader();
 
-      // Cancel upstream read if client aborts generation
       req.on('close', () => {
         reader.cancel().catch(() => {});
       });
@@ -103,16 +110,14 @@ app.post('/v1/chat/completions', async (req, res) => {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // Pipe raw binary buffers directly to prevent multi-byte UTF-8 corruption
         res.write(value);
       }
       return res.end();
     }
 
-    // Non-streaming JSON
+    // Standard JSON response
     const data = await upstreamResponse.json();
     return res.json(data);
-
   } catch (err) {
     console.error('Proxy Error:', err);
     res.status(500).json({ error: 'Proxy request failed', details: err.message });
@@ -121,3 +126,4 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Proxy listening on port ${PORT}`));
+
